@@ -10,6 +10,14 @@
   const LAVENDER = rgb(0.86, 0.84, 0.97);
   const PW = 842, PH = 595, M = 28, W = PW - 2 * M;
 
+  // Art eines Belegs: normale Rechnung, Kostenvoranschlag (zur Genehmigung, nicht in der Summe)
+  // oder Anzahlung/Teilzahlung (zählt zur Summe).
+  const KINDS = {
+    rechnung: { label: 'Rechnung', prefix: '' },
+    kva: { label: 'Kostenvoranschlag – Genehmigung erbeten', prefix: 'KVA ' },
+    anzahlung: { label: 'Anzahlung / Teilzahlung', prefix: 'Anzahlung ' },
+  };
+  const counts = b => (b.kind || 'rechnung') !== 'kva';
   const MONTHS = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
   const MONTHS_LONG = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
 
@@ -208,25 +216,31 @@
     cols[5].w = W - cols.slice(0, 5).reduce((a, c) => a + c.w, 0);
     const TS = 9, TLH = 11, PAD = 3;
 
-    const totals = {};
+    const totals = {}, kvaTotals = {};
     const rows = entries.map((e, idx) => {
       const n = idx + 1;
       const amountLines = [];
       const items = e.belege.filter(b => b.amount != null && !isNaN(b.amount));
       items.forEach((b, j) => {
         const cur = b.currency || settings.waehrung || 'IDR';
-        totals[cur] = (totals[cur] || 0) + b.amount;
-        amountLines.push(`${cur} ${fmtAmount(b.amount)}${j < items.length - 1 ? '+' : ''}`);
+        const kind = KINDS[b.kind] || KINDS.rechnung;
+        if (counts(b)) totals[cur] = (totals[cur] || 0) + b.amount;
+        else kvaTotals[cur] = (kvaTotals[cur] || 0) + b.amount;
+        const str = `${kind.prefix}${cur} ${fmtAmount(b.amount)}${j < items.length - 1 && counts(items[j + 1]) && counts(b) ? '+' : ''}`;
+        wrap(S(str), F, TS, cols[4].w - 2 * PAD).forEach(l => amountLines.push(counts(b) ? l : { s: l, color: GREY }));
       });
-      const cells = [belegLabel(n, e.belege.length), e.person, fmtDateShort(e.date), e.diagnose, amountLines.join('\n'), e.anmerkung];
-      const wrapped = cells.map((c, i) => wrap(S(c), F, TS, cols[i].w - 2 * PAD));
+      const cells = [belegLabel(n, e.belege.length), e.person, fmtDateShort(e.date), e.diagnose, null, e.anmerkung];
+      const wrapped = cells.map((c, i) => i === 4 ? amountLines : wrap(S(c), F, TS, cols[i].w - 2 * PAD));
       const h = Math.max(...wrapped.map(l => l.length)) * TLH + 2 * PAD + 2;
       return { wrapped, h };
     });
     const headerWrapped = cols.map(c => c.t.split('\n'));
     const headerH = 2 * TLH + 2 * PAD + 2;
     const totalLines = Object.entries(totals).map(([c, v]) => `${c} ${fmtAmount(v)}`);
-    const totalH = Math.max(1, totalLines.length) * TLH + 2 * PAD + 2;
+    let totalH = Math.max(1, totalLines.length) * TLH + 2 * PAD + 2;
+    const kvaLines = Object.entries(kvaTotals).map(([c, v]) => `KVA ${c} ${fmtAmount(v)}`);
+    const kvaH = kvaLines.length ? Math.max(2, kvaLines.length) * TLH + 2 * PAD + 2 : 0;
+    totalH += kvaH;
     const TABLE_TOP = PH - 166;
     const avail = TABLE_TOP - FOOTER_TOP - 6;
 
@@ -247,7 +261,9 @@
         const lines = cellsLines[i] || [];
         lines.forEach((s, k) => {
           const ty = y - PAD - TS - k * TLH + 1;
-          const style = { size: TS, bold: o.bold, color: o.colors ? o.colors[i] : BLACK };
+          let color = o.colors ? o.colors[i] : BLACK;
+          if (s && typeof s === 'object') { color = s.color; s = s.s; }
+          const style = { size: TS, bold: o.bold, color };
           if (c.a === 'c' || o.center) textCenter(p, s, x + c.w / 2, ty, style);
           else txt(p, s, x + PAD, ty, style);
         });
@@ -264,8 +280,10 @@
       y = drawRow(p, y, headerWrapped, headerH, { bold: true, center: true });
       pr.forEach(r => { y = drawRow(p, y, r.wrapped, r.h); });
       if (pi === pages.length - 1) {
-        drawRow(p, y, ['', ['Gesamt/TOTAL'], '', '', totalLines, ['TOTAL']], totalH,
+        y = drawRow(p, y, ['', ['Gesamt/TOTAL'], '', '', totalLines, ['TOTAL']], totalH - kvaH,
           { bold: true, colors: [RED, RED, RED, RED, RED, RED] });
+        if (kvaH) drawRow(p, y, ['', ['Kostenvoranschläge', 'zur Genehmigung'], '', ['nicht in der Summe enthalten'], kvaLines, ['Bitte um Genehmigung']], kvaH,
+          { bold: true, colors: [GREY, GREY, GREY, GREY, GREY, GREY] });
       }
     });
 
@@ -274,7 +292,8 @@
       const e = entries[idx];
       for (let j = 0; j < e.belege.length; j++) {
         const b = e.belege[j];
-        const label = `Beleg ${subLabel(idx + 1, j, e.belege.length)}  |  ${e.person}  |  ${fmtDateShort(e.date)}  |  ${e.diagnose || ''}${b.amount != null ? '  |  ' + (b.currency || 'IDR') + ' ' + fmtAmount(b.amount) : ''}`;
+        const kindTxt = (b.kind && b.kind !== 'rechnung') ? `${KINDS[b.kind].label}  |  ` : '';
+        const label = `${kindTxt}Beleg ${subLabel(idx + 1, j, e.belege.length)}  |  ${e.person}  |  ${fmtDateShort(e.date)}  |  ${e.diagnose || ''}${b.amount != null ? '  |  ' + (b.currency || 'IDR') + ' ' + fmtAmount(b.amount) : ''}`;
         const nr = subLabel(idx + 1, j, e.belege.length);
         const stamp = (pg, xr, yt) => {
           const big = 26, sw = Math.max(FB.widthOfTextAtSize(nr, big), FB.widthOfTextAtSize('BELEG-NR.', 8)) + 20, sh = 48;
@@ -329,5 +348,5 @@
     return `Barmenia_Abrechnung_${range}.pdf`;
   }
 
-  window.ClaimPdf = { build, fileName, fmtAmount, fmtDateShort };
+  window.ClaimPdf = { build, fileName, fmtAmount, fmtDateShort, KINDS, counts };
 })();

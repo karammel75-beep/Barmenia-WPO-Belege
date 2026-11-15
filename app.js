@@ -9,6 +9,8 @@ const ANMERKUNG_VORSCHLAEGE = [
   'Wundbehandlung und Naht', 'Verbandwechsel & Wundbehandlung', 'Fäden ziehen und Wundbehandlung',
   'Zahnarzt', 'Zahnreinigung (Prophylaxe)', 'Kariesbehandlung / Füllung', 'Inlay', 'Wurzelbehandlung',
   'Zahnextraktion', 'Zahnorthopäde', 'Zahnspange Kostenvoranschlag',
+  'Kostenvoranschlag – Bitte um Genehmigung', 'Anzahlung (Teilbetrag) laut Kostenvoranschlag',
+  'Kostenvoranschlag mit Anzahlung – Bitte um Genehmigung und Erstattung der Anzahlung', 'Restzahlung laut genehmigtem Kostenvoranschlag',
   'Augenarzt und Neuverschreibung', 'Brille / Kontaktlinsen',
   'Physiotherapie (ärztlich verordnet)', 'Impfung', 'Vorsorgeuntersuchung', 'Hilfsmittel', 'Krankentransport',
 ];
@@ -63,7 +65,14 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const todayIso = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
-const { fmtAmount, fmtDateShort } = window.ClaimPdf;
+const { fmtAmount, fmtDateShort, KINDS, counts } = window.ClaimPdf;
+// Summe je Währung; Kostenvoranschläge zählen nicht mit.
+function sumBelege(belege, pred = counts) {
+  const by = {};
+  belege.forEach(b => { if (b.amount != null && pred(b)) by[b.currency || 'IDR'] = (by[b.currency || 'IDR'] || 0) + b.amount; });
+  return by;
+}
+const fmtSums = by => Object.entries(by).map(([c, v]) => `${c} ${fmtAmount(v)}`).join(' + ');
 
 function parseAmount(s) {
   s = String(s ?? '').replace(/[^\d.,-]/g, '');
@@ -132,9 +141,9 @@ function go(tab) {
 function setHeader(title, actionHtml = '') { $('#title').textContent = title; $('#headAction').innerHTML = actionHtml; }
 
 function entryTotalText(e) {
-  const by = {};
-  e.belege.forEach(b => { if (b.amount != null) by[b.currency || 'IDR'] = (by[b.currency || 'IDR'] || 0) + b.amount; });
-  return Object.entries(by).map(([c, v]) => `${c} ${fmtAmount(v)}`).join(' + ') || '–';
+  const paid = fmtSums(sumBelege(e.belege));
+  const kva = fmtSums(sumBelege(e.belege, b => !counts(b)));
+  return [paid, kva && `KVA ${kva}`].filter(Boolean).join(' · ') || '–';
 }
 async function entryCard(e) {
   const f = e.belege[0] ? await fileRec(e.belege[0].photoId) : null;
@@ -143,7 +152,7 @@ async function entryCard(e) {
     <div class="t"><b>${esc(e.person || 'Ohne Person')}</b>
       <div class="small">${esc(fmtDateShort(e.date))} · ${esc(e.diagnose || 'keine Diagnose')}</div>
       <div class="small">${esc(e.anmerkung || '')}${e.belege.length > 1 ? ` · ${e.belege.length} Belege` : ''}</div></div>
-    <div><div class="amount">${esc(entryTotalText(e))}</div><div style="text-align:right;margin-top:4px"><span class="badge ${e.status}">${e.status}</span></div></div></div>`;
+    <div><div class="amount">${esc(entryTotalText(e))}</div><div style="text-align:right;margin-top:4px">${e.belege.some(b => b.kind === 'kva') ? '<span class="badge">KVA</span> ' : ''}<span class="badge ${e.status}">${e.status}</span></div></div></div>`;
 }
 
 // ---------- Tab: Belege ----------
@@ -205,7 +214,7 @@ async function editEntry(e) {
     </div>
     <div class="card">
       <b>Belege / Rechnungen</b>
-      <div class="small">Mehrere Rechnungen zum selben Arztbesuch (z. B. Arzt + Apotheke) hier zusammen erfassen, jeweils mit Betrag.</div>
+      <div class="small">Mehrere Rechnungen zum selben Arztbesuch (z. B. Arzt + Apotheke) hier zusammen erfassen, jeweils mit Betrag. Bei einem Kostenvoranschlag mit Anzahlung beide Belege hier erfassen: den Voranschlag als „Kostenvoranschlag“ (zählt nicht zur Summe) und die Quittung als „Anzahlung“.</div>
       <div class="photos" id="photos"></div>
       <div class="addrow">
         <label class="btn secondary">+ Weiteres Foto / PDF<input type="file" id="addFile" accept="image/*,application/pdf" multiple></label>
@@ -225,6 +234,7 @@ async function editEntry(e) {
       const f = await fileRec(b.photoId);
       const vis = f && f.thumb ? `<img src="${f.thumb}" data-open="${i}" alt="Beleg">` : `<div class="pdf" data-open="${i}">PDF</div>`;
       h += `<div class="photo">${vis}<div class="in"><div class="small" style="margin-bottom:6px">Rechnung ${i + 1} · Foto antippen zum Vergrößern</div>
+        <select data-kind="${i}" style="margin-bottom:8px">${Object.entries(KINDS).map(([k, v]) => `<option value="${k}" ${(b.kind || 'rechnung') === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
         <div class="row"><select data-cur="${i}">${[...new Set([b.currency || s.waehrung, ...WAEHRUNGEN])].map(c => `<option ${c === b.currency ? 'selected' : ''}>${c}</option>`).join('')}</select>
         <input inputmode="decimal" data-amt="${i}" placeholder="Betrag" value="${b.amount != null ? esc(fmtAmount(b.amount)) : ''}"></div>
         <button class="rm" data-rm="${i}">Entfernen</button></div></div>`;
@@ -232,6 +242,12 @@ async function editEntry(e) {
     $('#photos').innerHTML = h || '<div class="small" style="padding:10px 0">Noch kein Foto.</div>';
     document.querySelectorAll('[data-amt]').forEach(inp => inp.onchange = () => {
       const v = parseAmount(inp.value); e.belege[+inp.dataset.amt].amount = v; inp.value = v != null ? fmtAmount(v) : '';
+    });
+    document.querySelectorAll('[data-kind]').forEach(sel => sel.onchange = () => {
+      e.belege[+sel.dataset.kind].kind = sel.value;
+      const anm = $('#fAnm');
+      if (!anm.value && sel.value === 'kva') anm.value = 'Kostenvoranschlag – Bitte um Genehmigung';
+      if (!anm.value && sel.value === 'anzahlung') anm.value = 'Anzahlung (Teilbetrag) laut Kostenvoranschlag';
     });
     document.querySelectorAll('[data-cur]').forEach(sel => sel.onchange = () => e.belege[+sel.dataset.cur].currency = sel.value);
     document.querySelectorAll('[data-rm]').forEach(btn => btn.onclick = async () => {
@@ -296,13 +312,14 @@ async function renderAbrechnen() {
       <div id="chkList">${open.map(e => `<label class="chk"><input type="checkbox" data-id="${e.id}" checked>
         <div style="flex:1"><b style="color:var(--ink)">${esc(e.person)}</b> · ${esc(fmtDateShort(e.date))}<div class="small">${esc(e.diagnose)}${e.anmerkung ? ' · ' + esc(e.anmerkung) : ''}</div></div>
         <div class="amount" style="color:var(--ink)">${esc(entryTotalText(e))}</div></label>`).join('')}</div>
-      <div class="total" id="sum"></div></div>
+      <div class="total" id="sum"></div><div class="total small" id="sumKva" style="font-weight:400"></div></div>
     <button class="btn" id="mk">PDF erstellen</button>
     <div id="result"></div>`;
   const upd = () => {
-    const by = {};
-    open.filter(e => sel.has(e.id)).forEach(e => e.belege.forEach(b => { if (b.amount != null) by[b.currency] = (by[b.currency] || 0) + b.amount; }));
-    $('#sum').innerHTML = `<span>Gesamt (${sel.size})</span><span>${Object.entries(by).map(([c, v]) => `${c} ${fmtAmount(v)}`).join(' + ') || '–'}</span>`;
+    const bel = open.filter(e => sel.has(e.id)).flatMap(e => e.belege);
+    const kva = fmtSums(sumBelege(bel, b => !counts(b)));
+    $('#sum').innerHTML = `<span>Gesamt (${sel.size})</span><span>${fmtSums(sumBelege(bel)) || '–'}</span>`;
+    $('#sumKva').innerHTML = kva ? `<span>Kostenvoranschläge (nicht in Summe)</span><span>${kva}</span>` : '';
     $('#mk').disabled = !sel.size;
   };
   document.querySelectorAll('#chkList input').forEach(c => c.onchange = () => { c.checked ? sel.add(c.dataset.id) : sel.delete(c.dataset.id); upd(); });
@@ -325,7 +342,7 @@ async function renderAbrechnen() {
     $('#copyMail').onclick = async ev => { ev.preventDefault(); try { await navigator.clipboard.writeText(s.empfaengerEmail); toast('E-Mail-Adresse kopiert'); } catch { toast(s.empfaengerEmail); } };
     $('#done').onclick = async () => {
       const claim = { id: uid(), created: new Date().toISOString(), entryIds: chosen.map(e => e.id), filename: file.name, status: 'eingereicht', totals: {} };
-      chosen.forEach(e => e.belege.forEach(b => { if (b.amount != null) claim.totals[b.currency] = (claim.totals[b.currency] || 0) + b.amount; }));
+      claim.totals = sumBelege(chosen.flatMap(e => e.belege));
       await DB.put('claims', claim);
       for (const e of chosen) { e.status = 'eingereicht'; e.claimId = claim.id; await DB.put('entries', e); }
       toast('Als eingereicht markiert'); go('archiv');
