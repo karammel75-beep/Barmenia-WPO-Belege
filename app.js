@@ -116,15 +116,41 @@ async function compressImage(file) {
   t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
   return { blob, thumb: t.toDataURL('image/jpeg', 0.7) };
 }
+// Fingerabdruck der Originaldatei, um doppelt erfasste Belege zu erkennen
+async function fileHash(file) {
+  try {
+    const h = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return [...new Uint8Array(h)].slice(0, 16).map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch { return null; }
+}
 async function storeFile(file) {
   const id = uid();
+  const hash = await fileHash(file);
   if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
     await DB.put('files', { id, blob: new Blob([await file.arrayBuffer()], { type: 'application/pdf' }), type: 'application/pdf', thumb: '' });
-    return { photoId: id, type: 'application/pdf' };
+    return { photoId: id, type: 'application/pdf', hash };
   }
   const { blob, thumb } = await compressImage(file);
   await DB.put('files', { id, blob, type: 'image/jpeg', thumb });
-  return { photoId: id, type: 'image/jpeg' };
+  return { photoId: id, type: 'image/jpeg', hash };
+}
+// Sucht mögliche Doppel: gleiche Datei, oder gleiche Person + Datum + Betrag
+async function findDuplicates(e) {
+  const others = (await DB.all('entries')).filter(o => o.id !== e.id);
+  const desc = o => `${o.person}, ${fmtDateShort(o.date)}, ${entryTotalText(o)} (${o.status})`;
+  const msgs = [];
+  const seen = new Set();
+  e.belege.forEach((b, i) => {
+    if (!b.hash) return;
+    if (seen.has(b.hash)) msgs.push(`Rechnung ${i + 1} ist in diesem Beleg zweimal enthalten.`);
+    seen.add(b.hash);
+    const o = others.find(o => o.belege.some(x => x.hash === b.hash));
+    if (o) msgs.push(`Rechnung ${i + 1} wurde schon einmal erfasst: ${desc(o)}.`);
+  });
+  const amounts = e.belege.filter(b => b.amount != null).map(b => `${b.currency}|${b.amount}`);
+  others.filter(o => o.person === e.person && o.date === e.date && o.belege.some(x => x.amount != null && amounts.includes(`${x.currency}|${x.amount}`)))
+    .forEach(o => { if (!msgs.some(m => m.includes(desc(o)))) msgs.push(`Gleiche Person, gleiches Datum und gleicher Betrag wie: ${desc(o)}.`); });
+  return msgs;
 }
 async function fileRec(id) { return DB.get('files', id); }
 
@@ -163,6 +189,8 @@ async function newEntryFromFiles(files) {
   const s = await getSettings();
   const belege = [];
   for (const f of files) belege.push({ ...(await storeFile(f)), amount: null, currency: s.waehrung, kind: 'rechnung' });
+  const dups = (await findDuplicates({ id: '', person: '', date: '', belege })).filter(m => !m.startsWith('Gleiche'));
+  if (dups.length) alert('⚠️ Achtung, möglicherweise doppelt:\n\n' + dups.join('\n'));
   editEntry({ id: uid(), person: personList(s)[0] || '', date: todayIso(), diagnose: '', anmerkung: '', belege, status: 'offen', isNew: true });
 }
 async function filesFromClipboard() {
@@ -322,10 +350,11 @@ async function editEntry(e) {
     if (!e.belege.length) return alert('Bitte mindestens ein Foto oder PDF der Rechnung hinzufügen.');
     if (!e.person) return alert('Bitte die behandelte Person angeben.');
     if (e.belege.some(b => b.amount == null) && !confirm('Bei mindestens einem Beleg fehlt der Betrag. Trotzdem speichern?')) return;
+    const dups = await findDuplicates(e);
+    if (dups.length && !confirm('⚠️ Möglicherweise doppelt:\n\n' + dups.join('\n') + '\n\nTrotzdem speichern?')) return;
     for (const id of e._removed || []) await DB.del('files', id);
     delete e._removed; delete e.isNew;
     await DB.put('entries', e); toast('Gespeichert'); go('belege');
-takeSharedFiles();
   };
   $('#cancel').onclick = async () => { if (e.isNew) for (const b of e.belege) await DB.del('files', b.photoId); go('belege'); };
   const ro = $('#reopen'); if (ro) ro.onclick = async () => { e.status = 'offen'; delete e.claimId; await DB.put('entries', e); toast('Wieder offen'); editEntry(e); };
@@ -333,26 +362,84 @@ takeSharedFiles();
     if (!confirm('Beleg mit allen Fotos endgültig löschen?')) return;
     for (const b of e.belege) await DB.del('files', b.photoId);
     await DB.del('entries', e.id); toast('Gelöscht'); go('belege');
-takeSharedFiles();
   };
 }
 
 // ---------- Tab: Abrechnen ----------
-async function makePdf(entries) {
-  const s = await getSettings();
-  const bytes = await window.ClaimPdf.build(s, entries, async id => (await fileRec(id))?.blob);
-  const name = window.ClaimPdf.fileName(entries);
-  return new File([bytes], name, { type: 'application/pdf' });
+// Größenstufen für den Versand: "klein" reicht zum Lesen der Belege und hält die Mail klein.
+const QUALITY = { klein: { side: 1400, q: 0.6 }, hoch: { side: 2000, q: 0.8 } };
+const pref = (k, d) => { try { return localStorage.getItem('pref_' + k) || d; } catch { return d; } };
+const setPref = (k, v) => { try { localStorage.setItem('pref_' + k, v); } catch {} };
+
+async function recompress(blob, quality, stamp) {
+  const { side, q } = QUALITY[quality] || QUALITY.klein;
+  const bmp = await createImageBitmap(blob);
+  const sc = Math.min(1, side / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * sc); c.height = Math.round(bmp.height * sc);
+  const ctx = c.getContext('2d'); ctx.drawImage(bmp, 0, 0, c.width, c.height);
+  if (stamp) { // Beleg-Nummer als roter Stempel ins Bild (für Word)
+    const fs = Math.max(28, Math.round(c.width / 18)), pad = fs * 0.35;
+    ctx.font = `bold ${fs}px Arial, sans-serif`;
+    const t = stamp, small = Math.round(fs * 0.36);
+    const w = Math.max(ctx.measureText(t).width, fs * 2.6) + pad * 2, h = fs + small + pad * 2.2;
+    const x = c.width - w - pad, y = pad;
+    ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#d91a1a'; ctx.lineWidth = Math.max(3, fs / 10); ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = '#d91a1a'; ctx.textAlign = 'center';
+    ctx.font = `bold ${small}px Arial, sans-serif`; ctx.fillText('BELEG-NR.', x + w / 2, y + pad + small);
+    ctx.font = `bold ${fs}px Arial, sans-serif`; ctx.fillText(t, x + w / 2, y + pad * 1.4 + small + fs * 0.85);
+  }
+  const out = await new Promise(r => c.toBlob(r, 'image/jpeg', q));
+  return { blob: out, width: c.width, height: c.height };
 }
-async function sharePdf(file, s) {
+
+// Erzeugt die gewünschten Dateien: format = pdf | docx | beides
+async function makeFiles(entries, format, quality) {
+  const s = await getSettings();
+  const base = window.ClaimPdf.fileName(entries).replace(/\.pdf$/, '');
+  const files = [];
+  if (format === 'pdf' || format === 'beides') {
+    const bytes = await window.ClaimPdf.build(s, entries, async id => {
+      const f = await fileRec(id); if (!f) return null;
+      return f.type === 'application/pdf' ? f.blob : (await recompress(f.blob, quality)).blob;
+    });
+    files.push(new File([bytes], base + '.pdf', { type: 'application/pdf' }));
+  }
+  if (format === 'docx' || format === 'beides') {
+    const pdfAttach = [];
+    const { blob } = await window.ClaimDocx.build(s, entries, async (id, nr) => {
+      const f = await fileRec(id); if (!f) return null;
+      if (f.type === 'application/pdf') { pdfAttach.push(new File([f.blob], `${base}_Beleg_${nr}.pdf`, { type: 'application/pdf' })); return null; }
+      const r = await recompress(f.blob, quality, nr);
+      return { bytes: new Uint8Array(await r.blob.arrayBuffer()), width: r.width, height: r.height };
+    });
+    files.push(new File([blob], base + '.docx', { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+    // PDF-Belege kann Word nicht als Bild zeigen: sie gehen als eigene Dateien mit (nur wenn kein Gesamt-PDF dabei ist)
+    if (format === 'docx') files.push(...pdfAttach);
+  }
+  return files;
+}
+async function shareFiles(files, s) {
   const text = `Sehr geehrte Damen und Herren,\n\nanbei sende ich Ihnen den Leistungsauftrag zur Barmenia-Weltpolice (Vertrags-Nr. ${s.vertragsnr}) mit den zugehörigen Belegen.\n\nMit freundlichen Grüßen\n${s.name}`;
-  if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: file.name, text }); return true; }
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try { await navigator.share({ files, title: files[0].name, text }); return true; }
     catch (err) { if (err.name === 'AbortError') return false; }
   }
-  const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name; a.click();
+  for (const file of files) { const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name; a.click(); }
   return true;
 }
+const mb = n => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+const segmented = (name, opts, cur) => `<div class="filter seg" data-seg="${name}">${opts.map(([v, l]) => `<button type="button" data-v="${v}" class="${v === cur ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+function bindSegmented(name, cb) {
+  document.querySelectorAll(`[data-seg="${name}"] button`).forEach(b => b.onclick = () => {
+    document.querySelectorAll(`[data-seg="${name}"] button`).forEach(x => x.classList.toggle('on', x === b));
+    setPref(name, b.dataset.v); cb && cb(b.dataset.v);
+  });
+}
+const FORMAT_OPTS = [['pdf', 'PDF'], ['docx', 'Word (.docx)'], ['beides', 'Beides']];
+const QUALITY_OPTS = [['klein', 'Klein (für E-Mail)'], ['hoch', 'Hohe Qualität']];
+const btnLabel = f => ({ pdf: 'PDF erstellen', docx: 'Word-Datei erstellen', beides: 'PDF und Word erstellen' })[f];
+
 function sortByDate(list) { return list.sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.person || '').localeCompare(b.person || '')); }
 
 async function renderAbrechnen() {
@@ -367,7 +454,10 @@ async function renderAbrechnen() {
         <div style="flex:1"><b style="color:var(--ink)">${esc(e.person)}</b> · ${esc(fmtDateShort(e.date))}<div class="small">${esc(e.diagnose)}${e.anmerkung ? ' · ' + esc(e.anmerkung) : ''}</div></div>
         <div class="amount" style="color:var(--ink)">${esc(entryTotalText(e))}</div></label>`).join('')}</div>
       <div class="total" id="sum"></div><div class="total small" id="sumKva" style="font-weight:400"></div></div>
-    <button class="btn" id="mk">PDF erstellen</button>
+    <div class="card"><b>Format</b>${segmented('format', FORMAT_OPTS, pref('format', 'pdf'))}
+      <b style="display:block;margin-top:12px">Dateigröße</b>${segmented('quality', QUALITY_OPTS, pref('quality', 'klein'))}
+      <div class="small" style="margin-top:6px">„Klein“ verkleinert die Belegfotos, sie bleiben gut lesbar. PDF öffnet jede Krankenkasse problemlos, Word nur, wenn ihr das Dokument noch bearbeiten wollt.</div></div>
+    <button class="btn" id="mk">${btnLabel(pref('format', 'pdf'))}</button>
     <div id="result"></div>`;
   const upd = () => {
     const bel = open.filter(e => sel.has(e.id)).flatMap(e => e.belege);
@@ -378,24 +468,27 @@ async function renderAbrechnen() {
   };
   document.querySelectorAll('#chkList input').forEach(c => c.onchange = () => { c.checked ? sel.add(c.dataset.id) : sel.delete(c.dataset.id); upd(); });
   upd();
+  bindSegmented('format', f => { $('#mk').textContent = btnLabel(f); $('#result').innerHTML = ''; });
+  bindSegmented('quality', () => { $('#result').innerHTML = ''; });
   $('#mk').onclick = async () => {
     const chosen = open.filter(e => sel.has(e.id));
-    $('#mk').disabled = true; $('#mk').textContent = 'PDF wird erstellt …';
-    let file;
-    try { file = await makePdf(chosen); }
-    catch (err) { console.error(err); alert('Das PDF konnte nicht erstellt werden: ' + err.message); $('#mk').disabled = false; $('#mk').textContent = 'PDF erstellen'; return; }
-    $('#mk').textContent = 'PDF neu erstellen'; $('#mk').disabled = false;
-    const url = URL.createObjectURL(file);
-    $('#result').innerHTML = `<div class="card"><b>${esc(file.name)}</b><div class="small">${(file.size / 1024 / 1024).toFixed(1)} MB · ${chosen.length} Positionen</div>
-      <button class="btn secondary" id="viewPdf">PDF ansehen</button>
+    const format = pref('format', 'pdf'), quality = pref('quality', 'klein');
+    $('#mk').disabled = true; $('#mk').textContent = 'Wird erstellt …';
+    let files;
+    try { files = await makeFiles(chosen, format, quality); }
+    catch (err) { console.error(err); alert('Das Dokument konnte nicht erstellt werden: ' + err.message); $('#mk').disabled = false; $('#mk').textContent = btnLabel(format); return; }
+    $('#mk').textContent = 'Neu erstellen'; $('#mk').disabled = false;
+    const total = files.reduce((a, f) => a + f.size, 0);
+    $('#result').innerHTML = `<div class="card">${files.map((f, i) => `<div class="chk"><div style="flex:1"><b style="color:var(--ink)">${esc(f.name)}</b><div class="small">${mb(f.size)}</div></div><button class="btn secondary" data-open="${i}" style="width:auto;margin:0;padding:8px 14px">Ansehen</button></div>`).join('')}
+      <div class="small">${files.length > 1 ? `Zusammen ${mb(total)} · ` : ''}${chosen.length} Positionen${total > 15 * 1024 * 1024 ? ' · <b>Achtung: recht groß für eine E-Mail, ggf. „Klein“ wählen oder aufteilen.</b>' : ''}</div>
       <button class="btn" id="share">Teilen / per E-Mail senden</button>
       <div class="small" style="margin-top:10px">Empfänger: <b>${esc(s.empfaengerEmail)}</b> <a href="#" id="copyMail">kopieren</a></div>
       <button class="btn secondary" id="done">Als eingereicht markieren</button></div>`;
-    $("#viewPdf").onclick = () => window.open(url, '_blank');
-    $('#share').onclick = () => sharePdf(file, s);
+    document.querySelectorAll('[data-open]').forEach(b => b.onclick = () => window.open(URL.createObjectURL(files[+b.dataset.open]), '_blank'));
+    $('#share').onclick = () => shareFiles(files, s);
     $('#copyMail').onclick = async ev => { ev.preventDefault(); try { await navigator.clipboard.writeText(s.empfaengerEmail); toast('E-Mail-Adresse kopiert'); } catch { toast(s.empfaengerEmail); } };
     $('#done').onclick = async () => {
-      const claim = { id: uid(), created: new Date().toISOString(), entryIds: chosen.map(e => e.id), filename: file.name, status: 'eingereicht', totals: {} };
+      const claim = { id: uid(), created: new Date().toISOString(), entryIds: chosen.map(e => e.id), filename: files[0].name.replace(/\.(pdf|docx)$/, ''), status: 'eingereicht', totals: {} };
       claim.totals = sumBelege(chosen.flatMap(e => e.belege));
       await DB.put('claims', claim);
       for (const e of chosen) { e.status = 'eingereicht'; e.claimId = claim.id; await DB.put('entries', e); }
@@ -412,14 +505,14 @@ async function renderArchiv() {
   $('#view').innerHTML = claims.map(c => `<div class="card">
       <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(c.filename)}</b><span class="badge ${c.status}">${c.status}</span></div>
       <div class="small">Eingereicht am ${new Date(c.created).toLocaleDateString('de-DE')} · ${c.entryIds.length} Positionen · ${Object.entries(c.totals).map(([k, v]) => `${k} ${fmtAmount(v)}`).join(' + ')}</div>
-      <div class="row"><button class="btn secondary" data-pdf="${c.id}">PDF erneut erstellen</button>
+      <div class="row"><button class="btn secondary" data-pdf="${c.id}">Erneut erstellen</button>
       ${c.status === 'eingereicht' ? `<button class="btn" data-paid="${c.id}">Erstattet ✓</button>` : ''}</div></div>`).join('');
   document.querySelectorAll('[data-pdf]').forEach(b => b.onclick = async () => {
     const c = claims.find(x => x.id === b.dataset.pdf);
     const entries = sortByDate((await Promise.all(c.entryIds.map(id => DB.get('entries', id)))).filter(Boolean));
     b.textContent = 'Wird erstellt …';
-    const file = await makePdf(entries); b.textContent = 'PDF erneut erstellen';
-    await sharePdf(file, await getSettings());
+    const files = await makeFiles(entries, pref('format', 'pdf'), pref('quality', 'klein')); b.textContent = 'Erneut erstellen';
+    await shareFiles(files, await getSettings());
   });
   document.querySelectorAll('[data-paid]').forEach(b => b.onclick = async () => {
     const c = claims.find(x => x.id === b.dataset.paid); c.status = 'erstattet'; await DB.put('claims', c);

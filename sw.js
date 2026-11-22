@@ -1,5 +1,5 @@
-const CACHE = 'belege-v4';
-const FILES = ['./', './index.html', './app.js', './pdf.js', './vendor/pdf-lib.min.js',
+const CACHE = 'belege-v5';
+const FILES = ['./', './index.html', './app.js', './pdf.js', './docx.js', './vendor/jszip.min.js', './vendor/pdf-lib.min.js',
   './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
