@@ -21,13 +21,14 @@ const DIAGNOSE_VORSCHLAEGE = [
   'Zahnarztbesuch – Karies', 'Zahnarztbesuch – Zahnschmerzen', 'Zahnreinigung', 'Kieferorthopädie',
   'Kontrolle Sicht und Augen', 'Bindehautentzündung', 'Vorsorge / Check-up', 'Impfung',
 ];
-const WAEHRUNGEN = ['IDR', 'EUR', 'USD', 'SGD', 'THB', 'MYR', 'AUD', 'CHF', 'GBP', 'JPY', 'PHP', 'VND'];
+const WAEHRUNGEN = ['IDR', 'EUR'];
+let usedCurrencies = []; // eigene Währungen, die schon verwendet wurden
 const WAEHRUNG_NAMEN = { IDR: 'Rupiah', EUR: 'Euro', USD: 'US-Dollar', SGD: 'Sing.-Dollar', THB: 'Baht', MYR: 'Ringgit', AUD: 'Austr. Dollar', CHF: 'Franken', GBP: 'Pfund', JPY: 'Yen', PHP: 'Peso', VND: 'Dong' };
 // Auswahlliste: IDR und EUR zuerst, dann weitere, plus „Andere …“ für eigene Währungscodes
 function currencyOptions(cur) {
-  const list = [...new Set([...WAEHRUNGEN, ...(cur ? [cur] : [])])];
+  const list = [...new Set([...WAEHRUNGEN, ...usedCurrencies, ...(cur ? [cur] : [])])];
   return list.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}${WAEHRUNG_NAMEN[c] ? ' – ' + WAEHRUNG_NAMEN[c] : ''}</option>`).join('')
-    + '<option value="__other">Andere …</option>';
+    + '<option value="__other">Eigene Währung …</option>';
 }
 function askOtherCurrency(sel, fallback) {
   const v = (prompt('Währungscode eingeben (3 Buchstaben, z. B. HKD, CNY, KRW):') || '').trim().toUpperCase();
@@ -284,6 +285,7 @@ async function editEntry(e) {
   const persons = personList(s);
   if (e.person && !persons.includes(e.person)) persons.push(e.person);
   const all = await DB.all('entries');
+  usedCurrencies = [...new Set(all.flatMap(x => x.belege.map(b => b.currency)).filter(c => c && !WAEHRUNGEN.includes(c)))].sort();
   const used = k => [...new Set(all.map(x => x[k]).filter(Boolean))].sort();
   const locked = e.status !== 'offen';
   setHeader(e.isNew ? 'Neuer Beleg' : 'Beleg bearbeiten', '');
@@ -489,7 +491,11 @@ async function renderAbrechnen() {
   const upd = () => {
     const bel = open.filter(e => sel.has(e.id)).flatMap(e => e.belege);
     const kva = fmtSums(sumBelege(bel, b => !counts(b)));
-    $('#sum').innerHTML = `<span>Gesamt (${sel.size})</span><span>${fmtSums(sumBelege(bel)) || '–'}</span>`;
+    const by = sumBelege(bel);
+    const order = c => (c === 'IDR' ? '0' : c === 'EUR' ? '1' : '2') + c;
+    $('#sum').style.display = 'block';
+    $('#sum').innerHTML = `<div class="small" style="font-weight:400">${sel.size} Positionen</div>` + (Object.keys(by).sort((a, b) => order(a).localeCompare(order(b)))
+      .map(c => `<div style="display:flex;justify-content:space-between"><span>Total ${c}</span><span>${c} ${fmtAmount(by[c])}</span></div>`).join('') || '<div>–</div>');
     $('#sumKva').innerHTML = kva ? `<span>Kostenvoranschläge (nicht in Summe)</span><span>${kva}</span>` : '';
     $('#mk').disabled = !sel.size;
   };

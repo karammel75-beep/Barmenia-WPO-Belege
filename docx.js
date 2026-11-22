@@ -82,7 +82,10 @@
       rows.push({ cells: [{ xml: para(run(belegLabel(idx + 1, e.belege.length), { size: 9 }), { align: 'center' }) }, e.person, fmtDateShort(e.date), e.diagnose, { xml: para(amt) }, e.anmerkung] });
     });
     const tl = Object.entries(totals).map(([c, v]) => `${c} ${fmtAmount(v)}`).join('\n');
-    rows.push({ bold: true, color: RED, cells: ['', 'Gesamt/TOTAL', '', '', tl, 'TOTAL'] });
+    const curOrder = c => (c === 'IDR' ? '0' : c === 'EUR' ? '1' : '2') + c;
+    const totalRows = Object.entries(totals).sort((a, b) => curOrder(a[0]).localeCompare(curOrder(b[0])));
+    if (!totalRows.length) totalRows.push([sv.waehrung || 'IDR', 0]);
+    totalRows.forEach(([c, v]) => rows.push({ bold: true, color: RED, cells: ['', `Total ${c}`, '', '', `${c} ${fmtAmount(v)}`, `TOTAL in ${c}`] }));
     if (Object.keys(kva).length) rows.push({ bold: true, color: GREY, cells: ['', 'Kostenvoranschläge zur Genehmigung', '', 'nicht in der Summe enthalten', Object.entries(kva).map(([c, v]) => `KVA ${c} ${fmtAmount(v)}`).join('\n'), 'Bitte um Genehmigung'] });
     b += table(widths, rows);
     b += para('', { after: 120 });

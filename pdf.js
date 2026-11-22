@@ -236,8 +236,12 @@
     });
     const headerWrapped = cols.map(c => c.t.split('\n'));
     const headerH = 2 * TLH + 2 * PAD + 2;
-    const totalLines = Object.entries(totals).map(([c, v]) => `${c} ${fmtAmount(v)}`);
-    let totalH = Math.max(1, totalLines.length) * TLH + 2 * PAD + 2;
+    // Je Währung eine eigene Zeile „Total IDR“, „Total EUR“ … (nie über Währungen addieren)
+    const curOrder = c => (c === 'IDR' ? '0' : c === 'EUR' ? '1' : '2') + c;
+    const totalRows = Object.entries(totals).sort((a, b) => curOrder(a[0]).localeCompare(curOrder(b[0])));
+    if (!totalRows.length) totalRows.push([settings.waehrung || 'IDR', 0]);
+    const ROWH = TLH + 2 * PAD + 2;
+    let totalH = totalRows.length * ROWH;
     const kvaLines = Object.entries(kvaTotals).map(([c, v]) => `KVA ${c} ${fmtAmount(v)}`);
     const kvaH = kvaLines.length ? Math.max(2, kvaLines.length) * TLH + 2 * PAD + 2 : 0;
     totalH += kvaH;
@@ -280,8 +284,10 @@
       y = drawRow(p, y, headerWrapped, headerH, { bold: true, center: true });
       pr.forEach(r => { y = drawRow(p, y, r.wrapped, r.h); });
       if (pi === pages.length - 1) {
-        y = drawRow(p, y, ['', ['Gesamt/TOTAL'], '', '', totalLines, ['TOTAL']], totalH - kvaH,
-          { bold: true, colors: [RED, RED, RED, RED, RED, RED] });
+        for (const [c, v] of totalRows) {
+          y = drawRow(p, y, ['', [`Total ${c}`], '', '', [`${c} ${fmtAmount(v)}`], [`TOTAL in ${c}`]], ROWH,
+            { bold: true, colors: [RED, RED, RED, RED, RED, RED] });
+        }
         if (kvaH) drawRow(p, y, ['', ['Kostenvoranschläge', 'zur Genehmigung'], '', ['nicht in der Summe enthalten'], kvaLines, ['Bitte um Genehmigung']], kvaH,
           { bold: true, colors: [GREY, GREY, GREY, GREY, GREY, GREY] });
       }
