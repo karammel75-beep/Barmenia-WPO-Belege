@@ -21,7 +21,19 @@ const DIAGNOSE_VORSCHLAEGE = [
   'Zahnarztbesuch – Karies', 'Zahnarztbesuch – Zahnschmerzen', 'Zahnreinigung', 'Kieferorthopädie',
   'Kontrolle Sicht und Augen', 'Bindehautentzündung', 'Vorsorge / Check-up', 'Impfung',
 ];
-const WAEHRUNGEN = ['IDR', 'EUR', 'USD', 'SGD', 'THB', 'MYR', 'AUD', 'CHF', 'GBP'];
+const WAEHRUNGEN = ['IDR', 'EUR', 'USD', 'SGD', 'THB', 'MYR', 'AUD', 'CHF', 'GBP', 'JPY', 'PHP', 'VND'];
+const WAEHRUNG_NAMEN = { IDR: 'Rupiah', EUR: 'Euro', USD: 'US-Dollar', SGD: 'Sing.-Dollar', THB: 'Baht', MYR: 'Ringgit', AUD: 'Austr. Dollar', CHF: 'Franken', GBP: 'Pfund', JPY: 'Yen', PHP: 'Peso', VND: 'Dong' };
+// Auswahlliste: IDR und EUR zuerst, dann weitere, plus „Andere …“ für eigene Währungscodes
+function currencyOptions(cur) {
+  const list = [...new Set([...WAEHRUNGEN, ...(cur ? [cur] : [])])];
+  return list.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}${WAEHRUNG_NAMEN[c] ? ' – ' + WAEHRUNG_NAMEN[c] : ''}</option>`).join('')
+    + '<option value="__other">Andere …</option>';
+}
+function askOtherCurrency(sel, fallback) {
+  const v = (prompt('Währungscode eingeben (3 Buchstaben, z. B. HKD, CNY, KRW):') || '').trim().toUpperCase();
+  if (/^[A-Z]{3}$/.test(v)) { sel.innerHTML = currencyOptions(v); return v; }
+  sel.innerHTML = currencyOptions(fallback); return fallback;
+}
 
 // ---------- IndexedDB ----------
 const DB = (() => {
@@ -72,7 +84,8 @@ function sumBelege(belege, pred = counts) {
   belege.forEach(b => { if (b.amount != null && pred(b)) by[b.currency || 'IDR'] = (by[b.currency || 'IDR'] || 0) + b.amount; });
   return by;
 }
-const fmtSums = by => Object.entries(by).map(([c, v]) => `${c} ${fmtAmount(v)}`).join(' + ');
+// Summen je Währung getrennt ausweisen (nie über Währungen hinweg addieren)
+const fmtSums = by => Object.entries(by).map(([c, v]) => `${c} ${fmtAmount(v)}`).join(' · ');
 
 function parseAmount(s) {
   s = String(s ?? '').replace(/[^\d.,-]/g, '');
@@ -311,8 +324,10 @@ async function editEntry(e) {
       const vis = f && f.thumb ? `<img src="${f.thumb}" data-open="${i}" alt="Beleg">` : `<div class="pdf" data-open="${i}">PDF</div>`;
       h += `<div class="photo">${vis}<div class="in"><div class="small" style="margin-bottom:6px">Rechnung ${i + 1} · Foto antippen zum Vergrößern</div>
         <select data-kind="${i}" style="margin-bottom:8px">${Object.entries(KINDS).map(([k, v]) => `<option value="${k}" ${(b.kind || 'rechnung') === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
-        <div class="row"><select data-cur="${i}">${[...new Set([b.currency || s.waehrung, ...WAEHRUNGEN])].map(c => `<option ${c === b.currency ? 'selected' : ''}>${c}</option>`).join('')}</select>
-        <input inputmode="decimal" data-amt="${i}" placeholder="Betrag" value="${b.amount != null ? esc(fmtAmount(b.amount)) : ''}"></div>
+        <div class="small" style="margin:0 0 2px">Währung</div>
+        <select data-cur="${i}" style="margin-bottom:8px">${currencyOptions(b.currency || s.waehrung)}</select>
+        <div class="small" style="margin:0 0 2px">Betrag</div>
+        <input inputmode="decimal" data-amt="${i}" placeholder="Betrag" value="${b.amount != null ? esc(fmtAmount(b.amount)) : ''}">
         <button class="rm" data-rm="${i}">Entfernen</button></div></div>`;
     }
     $('#photos').innerHTML = h || '<div class="small" style="padding:10px 0">Noch kein Foto.</div>';
@@ -325,7 +340,10 @@ async function editEntry(e) {
       if (!anm.value && sel.value === 'kva') anm.value = 'Kostenvoranschlag – Bitte um Genehmigung';
       if (!anm.value && sel.value === 'anzahlung') anm.value = 'Anzahlung (Teilbetrag) laut Kostenvoranschlag';
     });
-    document.querySelectorAll('[data-cur]').forEach(sel => sel.onchange = () => e.belege[+sel.dataset.cur].currency = sel.value);
+    document.querySelectorAll('[data-cur]').forEach(sel => sel.onchange = () => {
+      const b = e.belege[+sel.dataset.cur];
+      b.currency = sel.value === '__other' ? askOtherCurrency(sel, b.currency || s.waehrung) : sel.value;
+    });
     document.querySelectorAll('[data-rm]').forEach(btn => btn.onclick = async () => {
       if (!confirm('Dieses Foto entfernen?')) return;
       const [b] = e.belege.splice(+btn.dataset.rm, 1); if (e.isNew) await DB.del('files', b.photoId); else e._removed = [...(e._removed || []), b.photoId];
@@ -514,7 +532,7 @@ async function renderArchiv() {
   if (!claims.length) { $('#view').innerHTML = `<div class="empty">Noch keine eingereichten Abrechnungen.</div>`; return; }
   $('#view').innerHTML = claims.map(c => `<div class="card">
       <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(c.filename)}</b><span class="badge ${c.status}">${c.status}</span></div>
-      <div class="small">Eingereicht am ${new Date(c.created).toLocaleDateString('de-DE')} · ${c.entryIds.length} Positionen · ${Object.entries(c.totals).map(([k, v]) => `${k} ${fmtAmount(v)}`).join(' + ')}</div>
+      <div class="small">Eingereicht am ${new Date(c.created).toLocaleDateString('de-DE')} · ${c.entryIds.length} Positionen · ${fmtSums(c.totals)}</div>
       <div class="row"><button class="btn secondary" data-pdf="${c.id}">Erneut erstellen</button>
       ${c.status === 'eingereicht' ? `<button class="btn" data-paid="${c.id}">Erstattet ✓</button>` : ''}</div></div>`).join('');
   document.querySelectorAll('[data-pdf]').forEach(b => b.onclick = async () => {
@@ -551,7 +569,7 @@ async function renderSettings() {
       <label>Kommunikation auf</label><select id="s_sprache"><option ${s.sprache === 'deutsch' ? 'selected' : ''}>deutsch</option><option ${s.sprache === 'englisch' ? 'selected' : ''}>englisch</option></select>
       <label class="chk" style="color:var(--ink);font-size:15px"><input type="checkbox" id="s_emailEinwilligung" ${s.emailEinwilligung !== false ? 'checked' : ''}> Einwilligung zur E-Mail-Nutzung ankreuzen</label>
       ${f('ort', 'Ort für „Ort, Datum, Unterschrift“', { ph: 'z. B. Jakarta' })}
-      <label>Standardwährung</label><select id="s_waehrung">${WAEHRUNGEN.map(c => `<option ${c === s.waehrung ? 'selected' : ''}>${c}</option>`).join('')}</select>
+      <label>Standardwährung</label><select id="s_waehrung">${currencyOptions(s.waehrung)}</select>
       ${f('reisezeit', 'Nur bei Reisen unter 90 Tagen: Reisezeit (von/bis)')}
       ${f('einsatzland', 'Nur bei Reisen unter 90 Tagen: Einsatzland')}
       ${f('empfaengerEmail', 'E-Mail-Adresse der Barmenia', { attrs: 'type="email" autocapitalize="off"' })}
@@ -571,6 +589,7 @@ async function renderSettings() {
     <div class="small" style="text-align:center;margin:20px 0">Weltpolice Belege · Daten bleiben lokal auf dem Gerät</div>`;
 
   // Unterschrift
+  $('#s_waehrung').onchange = ev => { if (ev.target.value === '__other') askOtherCurrency(ev.target, s.waehrung); };
   const cv = $('#sig'); const ctx = cv.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
   cv.width = cv.clientWidth * dpr; cv.height = cv.clientHeight * dpr;
@@ -586,6 +605,7 @@ async function renderSettings() {
   $('#saveS').onclick = async () => {
     const n = { ...s };
     for (const k of Object.keys(DEFAULT_SETTINGS)) { const el = $('#s_' + k); if (el) n[k] = el.type === 'checkbox' ? el.checked : el.value.trim(); }
+    if (n.waehrung === '__other') n.waehrung = s.waehrung;
     n.iban = n.iban.replace(/\s+/g, '').toUpperCase();
     n.signature = dirty ? cv.toDataURL('image/png') : sigData;
     await saveSettings(n); toast('Einstellungen gespeichert');

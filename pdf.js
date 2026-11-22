@@ -226,7 +226,7 @@
         const kind = KINDS[b.kind] || KINDS.rechnung;
         if (counts(b)) totals[cur] = (totals[cur] || 0) + b.amount;
         else kvaTotals[cur] = (kvaTotals[cur] || 0) + b.amount;
-        const str = `${kind.prefix}${cur} ${fmtAmount(b.amount)}${j < items.length - 1 && counts(items[j + 1]) && counts(b) ? '+' : ''}`;
+        const str = `${kind.prefix}${cur} ${fmtAmount(b.amount)}${j < items.length - 1 && counts(items[j + 1]) && counts(b) && (items[j + 1].currency || 'IDR') === cur ? '+' : ''}`;
         wrap(S(str), F, TS, cols[4].w - 2 * PAD).forEach(l => amountLines.push(counts(b) ? l : { s: l, color: GREY }));
       });
       const cells = [belegLabel(n, e.belege.length), e.person, fmtDateShort(e.date), e.diagnose, null, e.anmerkung];

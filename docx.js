@@ -76,7 +76,7 @@
       const amt = items.map((bb, j) => {
         const cur = bb.currency || 'IDR';
         if (counts(bb)) totals[cur] = (totals[cur] || 0) + bb.amount; else kva[cur] = (kva[cur] || 0) + bb.amount;
-        const t = `${(KINDS[bb.kind] || KINDS.rechnung).prefix}${cur} ${fmtAmount(bb.amount)}${j < items.length - 1 && counts(bb) && counts(items[j + 1]) ? '+' : ''}`;
+        const t = `${(KINDS[bb.kind] || KINDS.rechnung).prefix}${cur} ${fmtAmount(bb.amount)}${j < items.length - 1 && counts(bb) && counts(items[j + 1]) && (items[j + 1].currency || 'IDR') === cur ? '+' : ''}`;
         return run(t, { size: 9, color: counts(bb) ? undefined : GREY });
       }).join('<w:r><w:br/></w:r>');
       rows.push({ cells: [{ xml: para(run(belegLabel(idx + 1, e.belege.length), { size: 9 }), { align: 'center' }) }, e.person, fmtDateShort(e.date), e.diagnose, { xml: para(amt) }, e.anmerkung] });
