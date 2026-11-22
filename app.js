@@ -580,8 +580,8 @@ async function renderSettings() {
       ${f('einsatzland', 'Nur bei Reisen unter 90 Tagen: Einsatzland')}
       ${f('empfaengerEmail', 'E-Mail-Adresse der Barmenia', { attrs: 'type="email" autocapitalize="off"' })}
     </div>
-    <h2>Unterschrift</h2><div class="card">
-      <div class="small">Mit dem Finger unterschreiben. Sie wird in jedes PDF eingesetzt.</div>
+    <h2>Unterschrift des Versicherungsnehmers</h2><div class="card">
+      <div class="small">Hier unterschreibt die Person, die den Leistungsauftrag unterschreiben muss (z. B. dein Mann), einmal mit dem Finger. Die Unterschrift wird dann automatisch in jedes PDF und jede Word-Datei eingesetzt. Sie kann auch auf dem anderen Handy gesetzt und über „Belege senden“ oder „Nur Einstellungen exportieren“ mitgeschickt werden.</div>
       <canvas class="sig" id="sig"></canvas>
       <div class="row"><button class="btn secondary" id="sigClear">Löschen</button></div>
     </div>
@@ -636,7 +636,7 @@ async function exportBackup(full) {
 // ---------- Gemeinsam abrechnen: offene Belege an den Partner schicken ----------
 async function exportForPartner() {
   const open = (await DB.all('entries')).filter(e => e.status === 'offen');
-  if (!open.length) return alert('Auf diesem Handy gibt es keine offenen Belege zum Senden.');
+  if (!open.length && !(await getSettings()).signature) return alert('Auf diesem Handy gibt es keine offenen Belege zum Senden.');
   toast('Datei wird erstellt …');
   const files = [];
   for (const e of open) for (const b of e.belege) {
@@ -645,7 +645,8 @@ async function exportForPartner() {
     const blob = f.type === 'application/pdf' ? f.blob : (await recompress(f.blob, 'klein')).blob;
     files.push({ id: f.id, type: f.type, thumb: f.thumb, data: await blobToB64(blob) });
   }
-  const data = { app: 'weltpolice-belege', version: 1, kind: 'partner', created: new Date().toISOString(), entries: open, files };
+  const sigSrc = (await getSettings()).signature || '';
+  const data = { app: 'weltpolice-belege', version: 1, kind: 'partner', created: new Date().toISOString(), entries: open, files, signature: sigSrc };
   const name = `Belege-fuer-Partner_${todayIso()}.json`;
   const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
   let sent = false;
@@ -653,6 +654,7 @@ async function exportForPartner() {
     try { await navigator.share({ files: [file], title: name }); sent = true; } catch (e) { if (e.name === 'AbortError') return; }
   }
   if (!sent) { const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; a.click(); }
+  if (!open.length) { toast("Unterschrift wurde zum Senden bereitgestellt"); return; }
   if (confirm(`${open.length} Belege (${mb(file.size)}) wurden zum Senden bereitgestellt.\n\nSollen sie auf diesem Handy als „eingereicht“ markiert werden, damit sie nicht doppelt abgerechnet werden?`)) {
     for (const e of open) { e.status = 'eingereicht'; e.sentToPartner = new Date().toISOString(); await DB.put('entries', e); }
     toast('Als eingereicht markiert'); go(currentTab);
@@ -680,7 +682,15 @@ async function importPartner(file) {
     await DB.put('entries', ne);
     added++;
   }
-  alert(`${added} Belege übernommen${skipped ? `, ${skipped} doppelte übersprungen` : ''}.`);
+  // Unterschrift des Partners (Versicherungsnehmer) übernehmen, falls mitgeschickt
+  let sigMsg = '';
+  if (data.signature) {
+    const cur = await getSettings();
+    if (cur.signature !== data.signature && (!cur.signature || confirm('Die Datei enthält eine Unterschrift. Soll sie ab jetzt für alle Abrechnungen auf diesem Handy verwendet werden?'))) {
+      await saveSettings({ ...cur, signature: data.signature }); sigMsg = '\nDie Unterschrift wurde übernommen.';
+    }
+  }
+  alert(`${added} Belege übernommen${skipped ? `, ${skipped} doppelte übersprungen` : ''}.${sigMsg}`);
   go(currentTab);
 }
 
