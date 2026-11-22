@@ -18,7 +18,7 @@ const DIAGNOSE_VORSCHLAEGE = [
   'Erkältung / grippaler Infekt', 'Halsschmerzen', 'Fieber', 'Husten / Bronchitis', 'Ohrenschmerzen',
   'Magen-Darm-Infekt', 'Durchfall', 'Hautausschlag', 'Allergie', 'Insektenstich', 'Dengue-Verdacht',
   'Rückenschmerzen', 'Kopfschmerzen / Migräne', 'Unfall mit Verletzung', 'Nachbehandlung Verletzung',
-  'Zahnarztbesuch – Karies', 'Zahnarztbesuch – Zahnschmerzen', 'Zahnreinigung', 'Schiefe Zähne',
+  'Zahnarztbesuch – Karies', 'Zahnarztbesuch – Zahnschmerzen', 'Zahnreinigung', 'Kieferorthopädie',
   'Kontrolle Sicht und Augen', 'Bindehautentzündung', 'Vorsorge / Check-up', 'Impfung',
 ];
 const WAEHRUNGEN = ['IDR', 'EUR', 'USD', 'SGD', 'THB', 'MYR', 'AUD', 'CHF', 'GBP'];

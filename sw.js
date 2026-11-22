@@ -1,4 +1,4 @@
-const CACHE = 'belege-v5';
+const CACHE = 'belege-v6';
 const FILES = ['./', './index.html', './app.js', './pdf.js', './docx.js', './vendor/jszip.min.js', './vendor/pdf-lib.min.js',
   './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', e => {
