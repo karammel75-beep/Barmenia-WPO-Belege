@@ -178,7 +178,7 @@ async function entryCard(e) {
     <div class="t"><b>${esc(e.person || 'Ohne Person')}</b>
       <div class="small">${esc(fmtDateShort(e.date))} · ${esc(e.diagnose || 'keine Diagnose')}</div>
       <div class="small">${esc(e.anmerkung || '')}${e.belege.length > 1 ? ` · ${e.belege.length} Belege` : ''}</div></div>
-    <div><div class="amount">${esc(entryTotalText(e))}</div><div style="text-align:right;margin-top:4px">${e.belege.some(b => b.kind === 'kva') ? '<span class="badge">KVA</span> ' : ''}<span class="badge ${e.status}">${e.status}</span></div></div></div>`;
+    <div><div class="amount">${esc(entryTotalText(e))}</div><div style="text-align:right;margin-top:4px">${e.fromPartner ? '<span class="badge">Partner</span> ' : ''}${e.belege.some(b => b.kind === 'kva') ? '<span class="badge">KVA</span> ' : ''}<span class="badge ${e.status}">${e.status}</span></div></div></div>`;
 }
 
 // ---------- Dateien übernehmen (Auswahl, Zwischenablage, Teilen) ----------
@@ -446,12 +446,21 @@ async function renderAbrechnen() {
   setHeader('Abrechnen');
   const s = await getSettings();
   const open = sortByDate((await DB.all('entries')).filter(e => e.status === 'offen'));
-  if (!open.length) { $('#view').innerHTML = `<div class="empty">Keine offenen Belege.<br><br>Erfasse zuerst Belege im Tab „Belege“.</div>`; return; }
+  const partnerCard = `<details class="hint" id="partnerBox"><summary><b>👥 Gemeinsam abrechnen (Belege vom Partner)</b></summary>
+    <p><b>Handy A (schickt):</b> „Meine offenen Belege senden“ tippen und per <b>WhatsApp</b> oder <b>AirDrop</b> an Handy B schicken.</p>
+    <p><b>Handy B (rechnet ab):</b> In WhatsApp die Datei antippen → Teilen-Symbol → <b>„In Dateien sichern“</b>. Dann hier <b>„Belege vom Partner übernehmen“</b> tippen und die Datei wählen. Die Belege kommen zu deinen dazu, doppelte werden übersprungen.</p>
+    <button class="btn" id="sendPartner">Meine offenen Belege senden</button>
+    <label class="btn secondary" style="color:var(--ink)">Belege vom Partner übernehmen<input type="file" id="impPartner" accept="application/json,.json,text/plain" hidden></label></details>`;
+  const bindPartner = () => {
+    $('#sendPartner').onclick = () => exportForPartner();
+    $('#impPartner').onchange = async ev => { const f = ev.target.files[0]; if (f) await importPartner(f); ev.target.value = ''; };
+  };
+  if (!open.length) { $('#view').innerHTML = partnerCard + `<div class="empty">Keine offenen Belege.<br><br>Erfasse zuerst Belege im Tab „Belege“ oder übernimm die Belege deines Partners.</div>`; bindPartner(); return; }
   const sel = new Set(open.map(e => e.id));
-  $('#view').innerHTML = `
+  $('#view').innerHTML = partnerCard + `
     <div class="card"><b>Diese Belege in den Leistungsauftrag aufnehmen:</b>
       <div id="chkList">${open.map(e => `<label class="chk"><input type="checkbox" data-id="${e.id}" checked>
-        <div style="flex:1"><b style="color:var(--ink)">${esc(e.person)}</b> · ${esc(fmtDateShort(e.date))}<div class="small">${esc(e.diagnose)}${e.anmerkung ? ' · ' + esc(e.anmerkung) : ''}</div></div>
+        <div style="flex:1"><b style="color:var(--ink)">${esc(e.person)}</b> · ${esc(fmtDateShort(e.date))}<div class="small">${esc(e.diagnose)}${e.anmerkung ? ' · ' + esc(e.anmerkung) : ''}${e.fromPartner ? ' · <b>vom Partner</b>' : ''}</div></div>
         <div class="amount" style="color:var(--ink)">${esc(entryTotalText(e))}</div></label>`).join('')}</div>
       <div class="total" id="sum"></div><div class="total small" id="sumKva" style="font-weight:400"></div></div>
     <div class="card"><b>Format</b>${segmented('format', FORMAT_OPTS, pref('format', 'pdf'))}
@@ -466,6 +475,7 @@ async function renderAbrechnen() {
     $('#sumKva').innerHTML = kva ? `<span>Kostenvoranschläge (nicht in Summe)</span><span>${kva}</span>` : '';
     $('#mk').disabled = !sel.size;
   };
+  bindPartner();
   document.querySelectorAll('#chkList input').forEach(c => c.onchange = () => { c.checked ? sel.add(c.dataset.id) : sel.delete(c.dataset.id); upd(); });
   upd();
   bindSegmented('format', f => { $('#mk').textContent = btnLabel(f); $('#result').innerHTML = ''; });
@@ -597,10 +607,62 @@ async function exportBackup(full) {
   if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; } }
   const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; a.click();
 }
+// ---------- Gemeinsam abrechnen: offene Belege an den Partner schicken ----------
+async function exportForPartner() {
+  const open = (await DB.all('entries')).filter(e => e.status === 'offen');
+  if (!open.length) return alert('Auf diesem Handy gibt es keine offenen Belege zum Senden.');
+  toast('Datei wird erstellt …');
+  const files = [];
+  for (const e of open) for (const b of e.belege) {
+    const f = await fileRec(b.photoId); if (!f) continue;
+    // Fotos für den Versand verkleinern, damit die Datei per WhatsApp gut durchgeht
+    const blob = f.type === 'application/pdf' ? f.blob : (await recompress(f.blob, 'klein')).blob;
+    files.push({ id: f.id, type: f.type, thumb: f.thumb, data: await blobToB64(blob) });
+  }
+  const data = { app: 'weltpolice-belege', version: 1, kind: 'partner', created: new Date().toISOString(), entries: open, files };
+  const name = `Belege-fuer-Partner_${todayIso()}.json`;
+  const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
+  let sent = false;
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); sent = true; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  if (!sent) { const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; a.click(); }
+  if (confirm(`${open.length} Belege (${mb(file.size)}) wurden zum Senden bereitgestellt.\n\nSollen sie auf diesem Handy als „eingereicht“ markiert werden, damit sie nicht doppelt abgerechnet werden?`)) {
+    for (const e of open) { e.status = 'eingereicht'; e.sentToPartner = new Date().toISOString(); await DB.put('entries', e); }
+    toast('Als eingereicht markiert'); go(currentTab);
+  }
+}
+async function importPartner(file) {
+  let data;
+  try { data = JSON.parse(await file.text()); } catch { return alert('Die Datei konnte nicht gelesen werden.'); }
+  if (data.app !== 'weltpolice-belege' || !Array.isArray(data.entries)) return alert('Das ist keine Beleg-Datei dieser App.');
+  const existing = await DB.all('entries');
+  const ids = new Set(existing.map(e => e.id));
+  const hashes = new Set(existing.flatMap(e => e.belege.map(b => b.hash).filter(Boolean)));
+  const key = e => `${e.person}|${e.date}|${e.belege.map(b => `${b.currency}:${b.amount}`).sort().join(',')}`;
+  const keys = new Set(existing.map(key));
+  const fileById = new Map((data.files || []).map(f => [f.id, f]));
+  let added = 0, skipped = 0;
+  for (const e of data.entries) {
+    const dupByHash = e.belege.length && e.belege.every(b => b.hash && hashes.has(b.hash));
+    if (ids.has(e.id) || dupByHash || keys.has(key(e))) { skipped++; continue; }
+    for (const b of e.belege) {
+      const f = fileById.get(b.photoId); if (!f) continue;
+      await DB.put('files', { id: f.id, type: f.type, thumb: f.thumb, blob: await (await fetch(f.data)).blob() });
+    }
+    const ne = { ...e, status: 'offen', fromPartner: true }; delete ne.claimId;
+    await DB.put('entries', ne);
+    added++;
+  }
+  alert(`${added} Belege übernommen${skipped ? `, ${skipped} doppelte übersprungen` : ''}.`);
+  go(currentTab);
+}
+
 async function importBackup(file) {
   let data;
   try { data = JSON.parse(await file.text()); } catch { return alert('Die Datei konnte nicht gelesen werden.'); }
   if (data.app !== 'weltpolice-belege') return alert('Das ist keine Sicherung dieser App.');
+  if (data.kind === 'partner') return importPartner(file);
   const parts = [data.settings && 'Einstellungen', data.entries && `${data.entries.length} Belege`].filter(Boolean).join(' und ');
   if (!confirm(`${parts} laden? Vorhandene Einträge mit gleicher Kennung werden ersetzt, alles andere bleibt erhalten.`)) return;
   if (data.settings) {
