@@ -155,29 +155,76 @@ async function entryCard(e) {
     <div><div class="amount">${esc(entryTotalText(e))}</div><div style="text-align:right;margin-top:4px">${e.belege.some(b => b.kind === 'kva') ? '<span class="badge">KVA</span> ' : ''}<span class="badge ${e.status}">${e.status}</span></div></div></div>`;
 }
 
+// ---------- Dateien übernehmen (Auswahl, Zwischenablage, Teilen) ----------
+async function newEntryFromFiles(files) {
+  files = files.filter(f => f && (/^image\//.test(f.type) || f.type === 'application/pdf' || /\.(pdf|jpe?g|png|heic)$/i.test(f.name || '')));
+  if (!files.length) { toast('Keine Bilder oder PDFs gefunden'); return; }
+  toast('Beleg wird geladen …');
+  const s = await getSettings();
+  const belege = [];
+  for (const f of files) belege.push({ ...(await storeFile(f)), amount: null, currency: s.waehrung, kind: 'rechnung' });
+  editEntry({ id: uid(), person: personList(s)[0] || '', date: todayIso(), diagnose: '', anmerkung: '', belege, status: 'offen', isNew: true });
+}
+async function filesFromClipboard() {
+  const out = [];
+  try {
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find(t => t === 'application/pdf') || item.types.find(t => t.startsWith('image/'));
+      if (!type) continue;
+      const blob = await item.getType(type);
+      out.push(new File([blob], `Anhang-${Date.now()}.${type === 'application/pdf' ? 'pdf' : type.split('/')[1]}`, { type }));
+    }
+  } catch (e) { console.warn(e); }
+  if (!out.length) alert('In der Zwischenablage ist kein Bild oder PDF. In der Mail das Bild gedrückt halten und „Kopieren“ wählen, dann hier erneut tippen. PDF-Anhänge bitte über „In Dateien sichern“ übernehmen.');
+  return out;
+}
+// Einfügen per Tastatur (z. B. am Computer): Strg/Cmd+V auf der Belegliste
+document.addEventListener('paste', ev => {
+  if (currentTab !== 'belege' || !$('#mailHint')) return;
+  const files = [...(ev.clipboardData?.files || [])];
+  if (files.length) { ev.preventDefault(); newEntryFromFiles(files); }
+});
+// Über das Teilen-Menü (Android) empfangene Dateien abholen
+async function takeSharedFiles() {
+  if (!('caches' in window)) return;
+  try {
+    const cache = await caches.open('shared-inbox');
+    const keys = await cache.keys();
+    if (!keys.length) return;
+    const files = [];
+    for (const k of keys) {
+      const r = await cache.match(k);
+      const blob = await r.blob();
+      files.push(new File([blob], decodeURIComponent(r.headers.get('X-Name') || 'Anhang'), { type: blob.type }));
+      await cache.delete(k);
+    }
+    history.replaceState(null, '', location.pathname);
+    await newEntryFromFiles(files);
+  } catch (e) { console.warn(e); }
+}
+
 // ---------- Tab: Belege ----------
 async function renderBelege() {
   setHeader('Belege', `<button class="iconbtn" id="addBtn" aria-label="Neuer Beleg">+</button>
     <input type="file" id="quickAdd" accept="image/*,application/pdf" multiple hidden>`);
   $('#addBtn').onclick = () => $('#quickAdd').click();
-  $('#quickAdd').onchange = async ev => {
-    const files = [...ev.target.files]; if (!files.length) return;
-    toast('Beleg wird geladen …');
-    const s = await getSettings();
-    const belege = [];
-    for (const f of files) belege.push({ ...(await storeFile(f)), amount: null, currency: s.waehrung });
-    editEntry({ id: uid(), person: personList(s)[0] || '', date: todayIso(), diagnose: '', anmerkung: '', belege, status: 'offen', isNew: true });
-  };
+  $('#quickAdd').onchange = ev => newEntryFromFiles([...ev.target.files]);
   const all = (await DB.all('entries')).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   const list = belegFilter === 'alle' ? all : all.filter(e => e.status === belegFilter);
   const counts = { offen: 0, eingereicht: 0, erstattet: 0 }; all.forEach(e => counts[e.status]++);
   const s = await getSettings();
   let html = '';
   if (!s.name || !s.vertragsnr) html += `<div class="hint">Bitte zuerst unter <a href="#" id="toSettings">Einstellungen</a> Vertragsnummer, Absender und Konto eintragen (oder eine Einrichtungsdatei laden).</div>`;
+  html += `<details class="hint" id="mailHint"><summary><b>📎 Anhang aus einer E-Mail übernehmen</b></summary>
+    <p><b>Weg 1 (PDF oder Bild):</b> In der Mail-App den Anhang antippen → Teilen-Symbol → <b>„In Dateien sichern“</b>. Dann hier auf <b>+</b> → <b>„Datei auswählen“</b> und den Anhang wählen.</p>
+    <p><b>Weg 2 (Bild):</b> In der Mail das Bild gedrückt halten → <b>„Kopieren“</b>. Dann hier auf <b>Einfügen</b> tippen.</p>
+    <p class="small">Auf Android-Handys erscheint die App zusätzlich direkt im Teilen-Menü.</p>
+    <button class="btn" id="pasteBtn">Aus Zwischenablage einfügen</button></details>`;
   html += `<div class="filter">${['offen', 'eingereicht', 'erstattet', 'alle'].map(f => `<button data-f="${f}" class="${f === belegFilter ? 'on' : ''}">${f[0].toUpperCase() + f.slice(1)}${f !== 'alle' ? ` (${counts[f]})` : ''}</button>`).join('')}</div>`;
   if (!list.length) html += `<div class="empty">${belegFilter === 'offen' ? 'Noch keine offenen Belege.<br><br>Tippe oben auf <b>+</b>, um eine Rechnung zu fotografieren oder aus deinen Fotos zu wählen.' : 'Keine Belege in dieser Ansicht.'}</div>`;
   for (const e of list) html += await entryCard(e);
   $('#view').innerHTML = html;
+  $('#pasteBtn').onclick = async () => { const f = await filesFromClipboard(); if (f.length) newEntryFromFiles(f); };
   const ts = $('#toSettings'); if (ts) ts.onclick = ev => { ev.preventDefault(); go('einstellungen'); };
   document.querySelectorAll('.filter button').forEach(b => b.onclick = () => { belegFilter = b.dataset.f; renderBelege(); });
   document.querySelectorAll('.entry').forEach(el => el.onclick = async () => editEntry(await DB.get('entries', el.dataset.id)));
@@ -218,6 +265,7 @@ async function editEntry(e) {
       <div class="photos" id="photos"></div>
       <div class="addrow">
         <label class="btn secondary">+ Weiteres Foto / PDF<input type="file" id="addFile" accept="image/*,application/pdf" multiple></label>
+        <button class="btn secondary" id="pasteMore" style="flex:0 0 auto;width:auto;margin:0">Einfügen</button>
       </div>
     </div>
     <button class="btn" id="save">Speichern</button>
@@ -260,6 +308,10 @@ async function editEntry(e) {
     });
   }
   renderPhotos();
+  $('#pasteMore').onclick = async () => {
+    for (const f of await filesFromClipboard()) e.belege.push({ ...(await storeFile(f)), amount: null, currency: s.waehrung, kind: 'rechnung' });
+    renderPhotos();
+  };
   $('#addFile').onchange = async ev => {
     for (const f of ev.target.files) e.belege.push({ ...(await storeFile(f)), amount: null, currency: s.waehrung });
     ev.target.value = ''; renderPhotos();
@@ -273,6 +325,7 @@ async function editEntry(e) {
     for (const id of e._removed || []) await DB.del('files', id);
     delete e._removed; delete e.isNew;
     await DB.put('entries', e); toast('Gespeichert'); go('belege');
+takeSharedFiles();
   };
   $('#cancel').onclick = async () => { if (e.isNew) for (const b of e.belege) await DB.del('files', b.photoId); go('belege'); };
   const ro = $('#reopen'); if (ro) ro.onclick = async () => { e.status = 'offen'; delete e.claimId; await DB.put('entries', e); toast('Wieder offen'); editEntry(e); };
@@ -280,6 +333,7 @@ async function editEntry(e) {
     if (!confirm('Beleg mit allen Fotos endgültig löschen?')) return;
     for (const b of e.belege) await DB.del('files', b.photoId);
     await DB.del('entries', e.id); toast('Gelöscht'); go('belege');
+takeSharedFiles();
   };
 }
 
@@ -475,3 +529,4 @@ async function importBackup(file) {
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 go('belege');
+takeSharedFiles();
